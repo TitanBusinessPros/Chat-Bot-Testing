@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Avatar Chat — Local, Free, Mic + Memory</title>
+<style>
+  :root { --bg:#0b0f18; --card:#121828; --text:#e8eefc; --muted:#97a2c3; --accent:#6cf; }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:16px/1.5 system-ui,Segoe UI,Roboto,Helvetica,Arial}
+  .wrap{max-width:980px;margin:0 auto;padding:20px}
+  .header{display:flex;gap:16px;align-items:center;margin-bottom:16px}
+  .avatarBox{position:relative;width:160px;aspect-ratio:1/1;border-radius:20px;overflow:hidden;background:#0d1224;border:1px solid #1e2a4d;box-shadow:0 10px 30px rgba(0,0,0,.45)}
+  .avatar{width:100%;height:100%;object-fit:cover;display:block}
+  .speaking{animation:glow .22s infinite alternate ease-in-out}
+  @keyframes glow{from{filter:drop-shadow(0 0 0px #6cf)} to{filter:drop-shadow(0 0 10px #6cf)}}
+  .title{font-weight:800;font-size:20px}
+  .small{font-size:13px;color:var(--muted)}
+  .pane{background:var(--card);border:1px solid #202a44;border-radius:16px;padding:16px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .input{flex:1;display:flex;gap:8px}
+  input[type=text]{flex:1;background:#0e1323;border:1px solid #222e53;color:var(--text);padding:10px 12px;border-radius:12px;outline:none}
+  button, select{background:var(--accent);color:#021;border:0;padding:10px 12px;border-radius:12px;font-weight:700;cursor:pointer}
+  button.ghost, select.ghost{background:#0e1323;color:var(--text);border:1px solid #22315a}
+  button[disabled]{opacity:.5;cursor:not-allowed}
+  .chat{margin-top:14px;max-height:60vh;overflow:auto;display:flex;flex-direction:column;gap:10px}
+  .msg{padding:12px 14px;border-radius:12px;max-width:80%}
+  .you{align-self:flex-end;background:#16213a;border:1px solid #24345f}
+  .bot{align-self:flex-start;background:#0f1a31;border:1px solid #22315a}
+  .muted{color:var(--muted);font-size:13px;margin-top:6px}
+  .controls{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .kv{display:flex;gap:8px;align-items:center;color:var(--muted);font-size:14px}
+  .status{font-size:12px;color:#9ddcff;margin-left:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="header">
+    <div class="avatarBox"><img id="avatar" class="avatar" src="Jesus%20Matrix.png" alt="Avatar"></div>
+    <div>
+      <div class="title">Avatar Chat — No API, Real Conversation</div>
+      <div class="small">HTTPS required for mic. Works on GitHub Pages.</div>
+    </div>
+  </div>
+
+  <div class="pane">
+    <div class="row">
+      <div class="input">
+        <input id="q" type="text" placeholder="Ask anything about your product (pricing, shipping, flavors…)" />
+        <button id="send">Send</button>
+      </div>
+      <div class="controls">
+        <div class="kv"><span>Voice:</span><select id="voiceSelect" class="ghost"></select></div>
+        <div class="kv"><span>Rate</span><input id="rate" type="range" min="0.6" max="1.4" step="0.05" value="1"></div>
+        <div class="kv"><span>Pitch</span><input id="pitch" type="range" min="0.8" max="1.4" step="0.05" value="1"></div>
+        <div class="kv"><button id="micBtn" class="ghost">🎤 Start Mic</button><span id="micStatus" class="status">mic: idle</span></div>
+      </div>
+    </div>
+
+    <div id="chat" class="chat"></div>
+
+    <div class="muted">
+      <p><strong>Where to put your 1,000 words:</strong> find the comment that says <code>PUT YOUR 1000 WORDS HERE</code> and paste your knowledge there.</p>
+      <p><strong>Change the voice:</strong> pick from the dropdown or set a default where the code says <code>// DEFAULT VOICE NAME</code>.</p>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   1) YOUR ~1000-WORD KNOWLEDGE BASE (edit this!)
+   ------------------------------------------------------------
+   ✅ PUT YOUR 1000 WORDS HERE. The bot will keep the
+   conversation natural BUT stay truthful to this content.
+============================================================ */
+const KNOWLEDGE = `
+We sell candy bars: milk chocolate, dark chocolate, caramel, peanut crunch, and mint.
+A sampler pack includes five bars and ships within 2 business days.
+Bulk discount: 10% off 12+ bars, 20% off 48+ bars.
+All bars are gluten-free; peanut crunch contains peanuts; other bars are nut-free.
+We ship within the continental US with a cold pack in warm months.
+Return policy: if melted or damaged on arrival, we reship free.
+Dark chocolate is 72% cacao; milk chocolate is 34% cacao.
+Mint bar uses natural peppermint oil; caramel is soft and slow-pulled.
+Fundraiser option: profits averaged $1.25 per bar for schools.
+Local pickup available in Wynnewood, OK, weekdays 10–4.
+`;
+
+/* ============================================================
+   2) Lightweight RAG + Conversation
+   - TF-IDF retrieval (no libs)
+   - Multi-turn memory
+   - Reply templates for variety
+============================================================ */
+const CHAT_HISTORY = []; // {role:'user'|'bot', text:string}
+const TEMPLATES = [
+  (q,lines)=>`Sure—${shorten(lines.join(' '))}`,
+  (q,lines)=>`Here’s the scoop: ${shorten(lines.join(' '))}`,
+  (q,lines)=>`Good question. ${shorten(lines.join(' '))}`,
+  (q,lines)=>`From what I know: ${shorten(lines.join(' '))}`,
+  (q,lines)=>`Quick answer: ${shorten(lines.join(' '))}`
+];
+function shorten(s){ return s.length>260 ? s.slice(0,257)+'…' : s; }
+
+function tokenize(s){ return s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(Boolean); }
+function buildDocs(raw){
+  const parts = raw.split(/\n+/).map(s=>s.trim()).filter(Boolean);
+  return parts.map((text,i)=>({id:i,text, tokens:tokenize(text)}));
+}
+const DOCS = buildDocs(KNOWLEDGE);
+const vocab = [...new Set(DOCS.flatMap(d=>d.tokens))];
+const idf = (()=>{ const N=DOCS.length, map={}; vocab.forEach(t=>{
+  const df = DOCS.reduce((a,d)=>a+(d.tokens.includes(t)?1:0),0);
+  map[t]=Math.log((N+1)/(df+1))+1;
+}); return map; })();
+function tfVec(tokens){ const c={}; tokens.forEach(t=>c[t]=(c[t]||0)+1);
+  const v=new Float32Array(vocab.length); vocab.forEach((t,i)=>v[i]=(c[t]||0)*idf[t]); return v; }
+function cosine(a,b){ let dot=0,na=0,nb=0; for(let i=0;i<a.length;i++){dot+=a[i]*b[i];na+=a[i]*a[i];nb+=b[i]*b[i];}
+  return (na&&nb)? dot/(Math.sqrt(na)*Math.sqrt(nb)) : 0; }
+
+function topContexts(query,k=4){
+  // include last user turn to bias continuity
+  const contextBoost = CHAT_HISTORY.slice(-3).map(m=>m.text||'').join(' ');
+  const qv = tfVec(tokenize(query+' '+contextBoost));
+  const scored = DOCS.map(d=>({d,score:cosine(qv, tfVec(d.tokens))}));
+  scored.sort((x,y)=>y.score-x.score);
+  return scored.slice(0,k).filter(s=>s.score>0.06);
+}
+
+function craftReply(userText){
+  const hits = topContexts(userText, 4);
+  if(!hits.length || hits[0].score<0.12){
+    // Ask a focused follow-up instead of repeating the same line
+    const followups = [
+      "Do you want info on flavors, shipping time, discounts, or fundraisers?",
+      "Are you asking about allergens, pricing, or delivery?",
+      "I can help with flavors, bulk deals, returns, and shipping—what should I cover?"
+    ];
+    return followups[Math.floor(Math.random()*followups.length)];
+  }
+  const lines = hits.map(h=>h.d.text);
+  // intent-ish tweak
+  const q=userText.toLowerCase();
+  if(/price|cost|discount|deal|bulk/.test(q)) lines.unshift("We have bulk discounts: 10% off 12+, 20% off 48+.");
+  if(/ship|delivery|arrive|how long|when/.test(q)) lines.unshift("Most orders ship in 2 business days; warm months use cold packs.");
+  if(/allergen|gluten|nut|peanut|safe/.test(q)) lines.unshift("All bars are gluten-free; only Peanut Crunch contains peanuts.");
+  // pick a template for variety
+  const t = TEMPLATES[Math.floor(Math.random()*TEMPLATES.length)];
+  return t(userText, lines);
+}
+
+/* ============================================================
+   3) UI + TTS (voice picker)
+============================================================ */
+const chatEl = document.getElementById('chat');
+const qEl = document.getElementById('q');
+const sendBtn = document.getElementById('send');
+const avatarEl = document.getElementById('avatar');
+const voiceSelect = document.getElementById('voiceSelect');
+const rateEl = document.getElementById('rate');
+const pitchEl = document.getElementById('pitch');
+
+function addMsg(text, who='bot'){
+  const div=document.createElement('div'); div.className=`msg ${who}`; div.textContent=text;
+  chatEl.appendChild(div); chatEl.scrollTop=chatEl.scrollHeight;
+}
+function setSpeaking(on){ if(on) avatarEl.classList.add('speaking'); else avatarEl.classList.remove('speaking'); }
+
+let voices=[];
+function populateVoices(){
+  voices = window.speechSynthesis ? speechSynthesis.getVoices() : [];
+  voiceSelect.innerHTML='';
+  voices.forEach(v=>{
+    const opt=document.createElement('option'); opt.value=v.name; opt.textContent=`${v.name} (${v.lang})`;
+    voiceSelect.appendChild(opt);
+  });
+  // ===== DEFAULT VOICE NAME (optional) =====
+  const DEFAULT_VOICE_NAME = ""; // e.g., "Google US English"
+  if(DEFAULT_VOICE_NAME){
+    const found=[...voiceSelect.options].find(o=>o.value===DEFAULT_VOICE_NAME);
+    if(found) voiceSelect.value=DEFAULT_VOICE_NAME;
+  }
+}
+if('speechSynthesis' in window){ populateVoices(); window.speechSynthesis.onvoiceschanged=populateVoices; }
+
+function speak(text){
+  if(!('speechSynthesis' in window)) return;
+  const u=new SpeechSynthesisUtterance(text.replace(/\n+/g,' '));
+  const chosen=voices.find(v=>v.name===voiceSelect.value); if(chosen) u.voice=chosen;
+  u.rate=parseFloat(rateEl.value||'1'); u.pitch=parseFloat(pitchEl.value||'1'); u.volume=1.0;
+  u.onstart=()=>setSpeaking(true); u.onend=()=>setSpeaking(false);
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+}
+
+function handleUser(text){
+  if(!text.trim()) return;
+  CHAT_HISTORY.push({role:'user', text});
+  addMsg(text,'you'); qEl.value='';
+  const reply = craftReply(text);
+  CHAT_HISTORY.push({role:'bot', text: reply});
+  addMsg(reply,'bot'); speak(reply);
+}
+
+sendBtn.onclick=()=>handleUser(qEl.value);
+qEl.addEventListener('keydown',e=>{ if(e.key==='Enter') handleUser(qEl.value); });
+
+// Greeting
+const greet = "Welcome! Ask me about flavors, pricing, bulk deals, allergens, shipping, returns, or fundraisers.";
+CHAT_HISTORY.push({role:'bot', text:greet}); addMsg(greet,'bot');
+
+/* ============================================================
+   4) Microphone — resilient start/stop + auto-restart
+============================================================ */
+const micBtn=document.getElementById('micBtn'); const micStatus=document.getElementById('micStatus');
+let shouldListen=false, recognizer=null, restartTimer=null;
+
+function setStatus(t){ micStatus.textContent=t; }
+function getRecognizer(){
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition||null;
+  if(!SR) return null;
+  const r=new SR(); r.lang='en-US'; r.interimResults=false; r.continuous=true; return r;
+}
+function cleanUp(){
+  if(recognizer){
+    recognizer.onstart=recognizer.onend=recognizer.onresult=recognizer.onerror=
+    recognizer.onaudioend=recognizer.onnomatch=null;
+  }
+  recognizer=null; if(restartTimer){ clearTimeout(restartTimer); restartTimer=null; }
+}
+function bootRecognizer(){
+  cleanUp(); recognizer=getRecognizer(); if(!recognizer){ setStatus('mic: unsupported'); return; }
+  recognizer.onstart=()=>setStatus('mic: listening…');
+  recognizer.onresult=(e)=>{ const res=e.results[e.results.length-1]; if(res&&res[0]){ const t=res[0].transcript.trim(); if(t) handleUser(t); } };
+  recognizer.onerror=(e)=>{ setStatus(`mic error: ${e.error||'unknown'}`); if(e.error==='not-allowed'||e.error==='service-not-allowed'){ shouldListen=false; micBtn.textContent='🎤 Start Mic'; } };
+  recognizer.onnomatch=()=>setStatus('mic: no match'); recognizer.onaudioend=()=>setStatus('mic: audio ended');
+  recognizer.onend=()=>{ if(shouldListen){ setStatus('mic: restarting…'); restartTimer=setTimeout(()=>{ try{ recognizer.start(); }catch{ bootRecognizer(); } },250);} else setStatus('mic: idle'); };
+  try{ recognizer.start(); }catch(err){ setStatus('mic start failed; retrying…'); setTimeout(()=>{ try{ recognizer.start(); }catch(e2){ setStatus('mic could not start: '+e2.message);} },300); }
+}
+function startMic(){
+  if(shouldListen) return; shouldListen=true;
+  if(!getRecognizer()){ setStatus('mic: unsupported in this browser'); micBtn.disabled=true; return; }
+  setStatus('mic: starting…'); micBtn.textContent='🛑 Stop Mic'; bootRecognizer();
+}
+function stopMic(){ shouldListen=false; setStatus('mic: stopping…'); micBtn.textContent='🎤 Start Mic'; try{ recognizer&&recognizer.stop(); }catch{} cleanUp(); setStatus('mic: idle'); }
+micBtn.addEventListener('click',()=>{ if(!shouldListen) startMic(); else stopMic(); });
+navigator.mediaDevices && navigator.mediaDevices.addEventListener?.('devicechange',()=>{ if(shouldListen){ setStatus('mic: device changed, restarting…'); bootRecognizer(); }});
+</script>
+</body>
+</html>
